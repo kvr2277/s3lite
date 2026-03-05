@@ -4,8 +4,6 @@ A web application for browsing and managing AWS S3 buckets.
 
 ## Screenshots
 
-**Home Page** - Dashboard with account metrics and bucket list
-![Home Page](docs/images/home_page.png)
 
 **Bucket View** - Browse objects with storage class info and actions
 ![Bucket Level](docs/images/bucket_level.png)
