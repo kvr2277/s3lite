@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>S3 Browser - Login</title>
+  <link rel="stylesheet" href="styles.css">
+  <style>
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      background: var(--bg);
+    }
+    .login-container {
+      width: 100%;
+      max-width: 420px;
+      padding: 1rem;
+    }
+    .login-card {
+      background: var(--surface);
+      border-radius: 16px;
+      padding: 2.5rem;
+      box-shadow: var(--shadow-lg);
+      border: 1px solid var(--border);
+    }
+    .login-header {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+    .login-header .logo {
+      margin-bottom: 1rem;
+      display: inline-block;
+    }
+    .login-header h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      margin-top: 0.5rem;
+    }
+    .login-header .subtitle {
+      color: var(--text-secondary);
+      font-size: 0.875rem;
+      margin-top: 0.25rem;
+    }
+    .login-error {
+      background: #fef2f2;
+      border: 1px solid #fecaca;
+      color: #dc2626;
+      padding: 0.75rem 1rem;
+      border-radius: 8px;
+      font-size: 0.8125rem;
+      margin-bottom: 1rem;
+      display: none;
+    }
+    .login-error.active { display: block; }
+    .login-success {
+      background: #f0fdf4;
+      border: 1px solid #bbf7d0;
+      color: #16a34a;
+      padding: 0.75rem 1rem;
+      border-radius: 8px;
+      font-size: 0.8125rem;
+      margin-bottom: 1rem;
+      display: none;
+    }
+    .login-success.active { display: block; }
+    .step { display: none; }
+    .step.active { display: block; }
+    .form-group { margin-bottom: 1.25rem; }
+    .form-group label {
+      display: block;
+      font-size: 0.8125rem;
+      font-weight: 600;
+      margin-bottom: 0.375rem;
+      color: var(--text-secondary);
+    }
+    .form-group input {
+      width: 100%;
+      padding: 0.75rem 1rem;
+      border: 1.5px solid var(--border);
+      border-radius: 8px;
+      font-size: 1rem;
+      transition: border-color 0.2s;
+      background: var(--surface);
+      color: var(--text);
+    }
+    .form-group input:focus {
+      outline: none;
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.1);
+    }
+    .code-input {
+      text-align: center;
+      font-size: 1.5rem !important;
+      letter-spacing: 0.5rem;
+      font-weight: 700;
+    }
+    .btn-login {
+      width: 100%;
+      padding: 0.75rem;
+      font-size: 1rem;
+      justify-content: center;
+    }
+    .back-link {
+      display: block;
+      text-align: center;
+      margin-top: 1rem;
+      font-size: 0.8125rem;
+      color: var(--text-secondary);
+      cursor: pointer;
+    }
+    .back-link:hover { color: var(--primary); }
+    .spinner-small {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: white;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-right: 0.5rem;
+      vertical-align: middle;
+    }
+  </style>
+</head>
+<body>
+  <div class="login-container">
+    <div class="login-card">
+      <div class="login-header">
+        <div class="logo">
+          <svg width="48" height="48" viewBox="0 0 40 40" fill="none">
+            <rect width="40" height="40" rx="10" fill="#0ea5e9"/>
+            <path d="M12 26V14l8 4v12l-8-4z" fill="#fff" opacity="0.9"/>
+            <path d="M20 18l8-4v12l-8 4V18z" fill="#fff" opacity="0.7"/>
+            <path d="M12 14l8-4 8 4-8 4-8-4z" fill="#fff"/>
+          </svg>
+        </div>
+        <h1>S3 Browser</h1>
+        <p class="subtitle">Sign in with your email</p>
+      </div>
+
+      <div id="login-error" class="login-error"></div>
+      <div id="login-success" class="login-success"></div>
+
+      <!-- Step 1: Email -->
+      <div id="step-email" class="step active">
+        <div class="form-group">
+          <label for="email-input">Email address</label>
+          <input type="email" id="email-input" placeholder="you@example.com" autocomplete="email" autofocus>
+        </div>
+        <button class="btn btn-primary btn-login" id="btn-send-code" onclick="sendCode()">Send Code</button>
+      </div>
+
+      <!-- Step 2: OTP Code -->
+      <div id="step-code" class="step">
+        <div class="form-group">
+          <label for="code-input">Verification code</label>
+          <input type="text" id="code-input" class="code-input" placeholder="000000" maxlength="6" autocomplete="one-time-code" inputmode="numeric">
+        </div>
+        <button class="btn btn-primary btn-login" id="btn-verify" onclick="verifyCode()">Verify</button>
+        <span class="back-link" onclick="backToEmail()">← Use a different email</span>
+      </div>
+    </div>
+  </div>
+
+  <script src="config.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/amazon-cognito-identity-js@6/dist/amazon-cognito-identity.min.js"></script>
+  <script>
+    var CONFIG = window.S3B_CONFIG || {};
+    var cognitoUser = null;
+
+    function showError(msg) {
+      var el = document.getElementById('login-error');
+      el.textContent = msg;
+      el.classList.add('active');
+      document.getElementById('login-success').classList.remove('active');
+    }
+
+    function showSuccess(msg) {
+      var el = document.getElementById('login-success');
+      el.textContent = msg;
+      el.classList.add('active');
+      document.getElementById('login-error').classList.remove('active');
+    }
+
+    function clearMessages() {
+      document.getElementById('login-error').classList.remove('active');
+      document.getElementById('login-success').classList.remove('active');
+    }
+
+    function setLoading(btnId, loading) {
+      var btn = document.getElementById(btnId);
+      if (loading) {
+        btn.disabled = true;
+        btn.dataset.origText = btn.textContent;
+        btn.innerHTML = '<span class="spinner-small"></span> Please wait...';
+      } else {
+        btn.disabled = false;
+        btn.textContent = btn.dataset.origText || 'Submit';
+      }
+    }
+
+    function sendCode() {
+      clearMessages();
+      var email = document.getElementById('email-input').value.trim();
+      if (!email) { showError('Please enter your email address.'); return; }
+
+      setLoading('btn-send-code', true);
+
+      var poolData = { UserPoolId: CONFIG.userPoolId, ClientId: CONFIG.clientId };
+      var userPool = new AmazonCognitoIdentity.CognitoUserPool(poolData);
+      var userData = { Username: email, Pool: userPool };
+      cognitoUser = new AmazonCognitoIdentity.CognitoUser(userData);
+
+      var authDetails = new AmazonCognitoIdentity.AuthenticationDetails({ Username: email });
+
+      cognitoUser.initiateAuth(authDetails, {
+        customChallenge: function(challengeParameters) {
+          setLoading('btn-send-code', false);
+          showSuccess('A verification code has been sent to ' + email + '. It may take up to 2 minutes. Please check your spam/junk folder.');
+          document.getElementById('step-email').classList.remove('active');
+          document.getElementById('step-code').classList.add('active');
+          document.getElementById('code-input').focus();
+        },
+        onSuccess: function(session) {
+          setLoading('btn-send-code', false);
+          handleAuthSuccess(session);
+        },
+        onFailure: function(err) {
+          setLoading('btn-send-code', false);
+          showError(err.message || 'Failed to send code. Please try again.');
+        }
+      });
+    }
+
+    function verifyCode() {
+      clearMessages();
+      var code = document.getElementById('code-input').value.trim();
+      if (!code || code.length !== 6) { showError('Please enter the 6-digit code.'); return; }
+      if (!cognitoUser) { showError('Session expired. Please start over.'); backToEmail(); return; }
+
+      setLoading('btn-verify', true);
+
+      cognitoUser.sendCustomChallengeAnswer(code, {
+        onSuccess: function(session) {
+          setLoading('btn-verify', false);
+          handleAuthSuccess(session);
+        },
+        onFailure: function(err) {
+          setLoading('btn-verify', false);
+          showError(err.message || 'Invalid code. Please try again.');
+        }
+      });
+    }
+
+    function handleAuthSuccess(session) {
+      var idToken = session.getIdToken().getJwtToken();
+      var refreshToken = session.getRefreshToken().getToken();
+
+      // Store ID token in cookie (8 hours)
+      document.cookie = 's3b_id_token=' + idToken + '; path=/; secure; samesite=lax; max-age=28800';
+
+      // Store refresh token in localStorage
+      try { localStorage.setItem('s3b_refresh_token', refreshToken); } catch(e) {}
+
+      // Redirect to main app
+      window.location.href = '/';
+    }
+
+    function backToEmail() {
+      clearMessages();
+      cognitoUser = null;
+      document.getElementById('step-code').classList.remove('active');
+      document.getElementById('step-email').classList.add('active');
+      document.getElementById('code-input').value = '';
+      document.getElementById('email-input').focus();
+    }
+
+    // Allow Enter key to submit
+    document.getElementById('email-input').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') sendCode();
+    });
+    document.getElementById('code-input').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') verifyCode();
+    });
+
+    // If already logged in, redirect
+    (function() {
+      var cookies = document.cookie.split(';');
+      for (var i = 0; i < cookies.length; i++) {
+        var c = cookies[i].trim();
+        if (c.startsWith('s3b_id_token=')) {
+          var token = c.substring('s3b_id_token='.length);
+          if (token && token.split('.').length === 3) {
+            try {
+              var payload = JSON.parse(atob(token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));
+              if (payload.exp && payload.exp > Date.now() / 1000) {
+                window.location.href = '/';
+                return;
+              }
+            } catch(e) {}
+          }
+        }
+      }
+    })();
+  </script>
+</body>
+</html>

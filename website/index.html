@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>S3 Browser</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
+  <script src="https://sdk.amazonaws.com/js/aws-sdk-2.1692.0.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/amazon-cognito-identity-js@6/dist/amazon-cognito-identity.min.js"></script>
+</head>
+<body>
+  <div id="app">
+    <div class="site-warning">Use with caution — details may not be fully accurate. Verify on the <a href="https://console.aws.amazon.com/s3/" target="_blank" rel="noopener">AWS Console</a> before taking critical actions.</div>
+    <nav class="navbar">
+      <div class="nav-left">
+        <div class="logo-small" onclick="navigateTo('home')">
+          <svg width="28" height="28" viewBox="0 0 40 40" fill="none">
+            <rect width="40" height="40" rx="10" fill="#0ea5e9"/>
+            <path d="M12 26V14l8 4v12l-8-4z" fill="#fff" opacity="0.9"/>
+            <path d="M20 18l8-4v12l-8 4V18z" fill="#fff" opacity="0.7"/>
+            <path d="M12 14l8-4 8 4-8 4-8-4z" fill="#fff"/>
+          </svg>
+          <span>S3 Browser</span>
+        </div>
+        <div id="breadcrumb" class="breadcrumb"></div>
+      </div>
+      <div class="nav-right">
+        <span id="auth-user" class="auth-user"></span>
+        <button class="btn btn-ghost" id="btn-logout" title="Sign out">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        </button>
+      </div>
+    </nav>
+
+    <main id="main-content" class="main-content">
+      <!-- Home View -->
+      <div id="home-view" class="view">
+        <div class="dashboard-cards">
+          <div class="dash-card">
+            <div class="dash-card-icon blue">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            </div>
+            <div class="dash-card-info">
+              <span class="dash-card-value" id="total-buckets">-</span>
+              <span class="dash-card-label">Buckets</span>
+            </div>
+          </div>
+          <div class="dash-card dash-card-group">
+            <div class="dash-card-group-header">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+              <span>Updated daily via CloudWatch — may take up to 24h to reflect changes</span>
+            </div>
+            <div class="dash-card-group-items">
+              <div class="dash-card-group-item">
+                <span class="dash-card-value" id="total-objects">-</span>
+                <span class="dash-card-label">Total Objects</span>
+              </div>
+              <div class="dash-card-group-divider"></div>
+              <div class="dash-card-group-item">
+                <span class="dash-card-value" id="total-size">-</span>
+                <span class="dash-card-label">Total Size</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Auto-Tiering Card -->
+        <div class="auto-tiering-card" id="auto-tiering-card" style="display:none;">
+          <div class="auto-tiering-header">
+            <div class="auto-tiering-title">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" stroke-width="2"><path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48l2.83-2.83"/></svg>
+              <span>Auto Intelligent-Tiering</span>
+            </div>
+            <div class="auto-tiering-status" id="auto-tiering-status"></div>
+          </div>
+          <p class="auto-tiering-desc">Save costs by automatically transitioning objects from S3 Standard to Intelligent-Tiering via S3 lifecycle rules.</p>
+          <div class="auto-tiering-actions">
+            <button class="btn btn-sm btn-primary" id="btn-enable-all-tiering">Enable on All Buckets</button>
+            <button class="btn btn-sm btn-secondary" id="btn-disable-all-tiering">Disable on All</button>
+          </div>
+        </div>
+
+        <!-- Search -->
+        <div class="search-section">
+          <div class="search-box-large">
+            <svg class="search-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+            <input type="text" id="bucket-search" placeholder="Search buckets (type at least 3 characters)..." autocomplete="off">
+          </div>
+          <div id="search-results" class="search-results"></div>
+        </div>
+
+        <!-- Create Bucket -->
+        <div class="create-section">
+          <a class="btn btn-primary" href="https://s3.console.aws.amazon.com/s3/bucket/create?region=us-east-1" target="_blank" rel="noopener">+ Create Bucket</a>
+        </div>
+
+        <!-- Bucket List -->
+        <div class="bucket-list-section">
+          <div class="bucket-list-header">
+            <h3 class="bucket-list-title">Buckets</h3>
+            <span id="bucket-list-count" class="bucket-list-count"></span>
+          </div>
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th class="sortable" id="bsort-name">Name <span class="sort-arrow">▲</span></th>
+                  <th class="sortable" id="bsort-size">Size <span class="sort-arrow"></span></th>
+                  <th class="sortable" id="bsort-date">Created <span class="sort-arrow"></span></th>
+                </tr>
+              </thead>
+              <tbody id="bucket-list-body"></tbody>
+            </table>
+          </div>
+          <div class="pagination-controls" id="bucket-pagination"></div>
+        </div>
+      </div>
+
+      <!-- Bucket Detail View -->
+      <div id="bucket-view" class="view" style="display:none;">
+        <div class="bucket-header">
+          <div class="bucket-info-cards">
+            <div class="info-card">
+              <span class="info-label">Bucket Objects</span>
+              <span class="info-value" id="bucket-total-object-count">...</span>
+            </div>
+            <div class="info-card">
+              <span class="info-label">Bucket Size</span>
+              <span class="info-value" id="bucket-total-bucket-size">...</span>
+            </div>
+            <div class="info-card">
+              <span class="info-label">Folder Objects</span>
+              <span class="info-value" id="bucket-file-count">-</span>
+            </div>
+            <div class="info-card">
+              <span class="info-label">Folder Size</span>
+              <span class="info-value" id="bucket-total-size">-</span>
+            </div>
+            <div class="info-card">
+              <a href="#" id="bucket-console-link" target="_blank" rel="noopener" class="console-link-card" title="Open in S3 Console">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                Open in Console
+              </a>
+            </div>
+          </div>
+          <div class="bucket-actions">
+            <button class="btn btn-primary" id="btn-show-create-folder">+ New Folder</button>
+            <button class="btn btn-primary" id="btn-upload-files">Upload Files</button>
+            <input type="file" id="file-input" multiple style="display:none;">
+            <button class="btn btn-secondary" id="btn-download-selected" disabled>Download Selected as ZIP</button>
+            <button class="btn btn-secondary" id="btn-download-bucket">Download All as ZIP</button>
+            <a class="btn btn-icon" id="btn-delete-bucket" href="#" target="_blank" rel="noopener" title="Delete bucket on Console">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            </a>
+          </div>
+        </div>
+        <!-- Standard Tier Banner (bucket level) -->
+        <div id="bucket-standard-tier-banner" class="tier-banner" style="display:none;">
+          <div class="tier-banner-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#ea580c" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          </div>
+          <div class="tier-banner-content">
+            <span class="tier-banner-text">
+              <strong id="std-bucket-count">0</strong> objects (<strong id="std-bucket-size">0 B</strong>) in S3 Standard.
+            </span>
+            <button class="btn btn-warning btn-sm" id="btn-convert-bucket-it">Switch to Intelligent-Tiering</button>
+          </div>
+        </div>
+        <!-- Version Cleanup Banner -->
+        <div id="bucket-version-banner" class="tier-banner version-banner" style="display:none;">
+          <div class="tier-banner-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="10"/></svg>
+          </div>
+          <div class="tier-banner-content">
+            <span class="tier-banner-text" id="version-banner-text"></span>
+            <div class="version-banner-actions">
+              <button class="btn btn-sm btn-warning" id="btn-cleanup-all">Remove All</button>
+              <button class="btn btn-sm btn-secondary" id="btn-cleanup-markers">Remove Delete Markers Only</button>
+              <button class="btn btn-sm btn-secondary" id="btn-cleanup-versions">Remove Old Versions Only</button>
+            </div>
+          </div>
+        </div>
+        <!-- Empty Bucket Info Banner -->
+        <div id="bucket-empty-info-banner" class="info-banner" style="display:none;">
+          <div class="info-banner-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#0284c7" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+          </div>
+          <div class="info-banner-content">
+            <span class="info-banner-text">Not seeing objects? CloudWatch metrics can take up to 24 hours to reflect changes. If objects were recently deleted, metrics may still show old values.</span>
+            <a href="#" id="btn-delete-empty-bucket" class="btn btn-sm btn-secondary">Delete Empty Bucket</a>
+          </div>
+        </div>
+        <!-- Lifecycle Rules -->
+        <div id="bucket-lifecycle-card" class="lifecycle-card" style="display:none;">
+          <div class="lifecycle-header">
+            <div class="lifecycle-title">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" stroke-width="2"><path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48l2.83-2.83"/></svg>
+              <span>Lifecycle Rules</span>
+            </div>
+            <button class="btn btn-sm btn-primary" id="btn-add-lifecycle">+ Add Rule</button>
+          </div>
+          <div id="lifecycle-rules-list" class="lifecycle-rules-list"></div>
+          <div id="lifecycle-add-form" class="lifecycle-add-form" style="display:none;">
+            <select id="lifecycle-sc">
+              <option value="INTELLIGENT_TIERING">Intelligent-Tiering</option>
+              <option value="STANDARD_IA">Standard-IA (after 30+ days)</option>
+              <option value="ONEZONE_IA">One Zone-IA (after 30+ days)</option>
+              <option value="GLACIER">Glacier Flexible Retrieval</option>
+              <option value="GLACIER_IR">Glacier Instant Retrieval</option>
+              <option value="DEEP_ARCHIVE">Deep Archive</option>
+            </select>
+            <div class="lifecycle-days-row">
+              <label>After</label>
+              <input type="number" id="lifecycle-days" value="0" min="0" max="3650">
+              <label>days</label>
+            </div>
+            <div class="lifecycle-add-actions">
+              <button class="btn btn-sm btn-primary" id="btn-save-lifecycle">Save</button>
+              <button class="btn btn-sm btn-secondary" id="btn-cancel-lifecycle">Cancel</button>
+            </div>
+            <div class="lifecycle-hint" id="lifecycle-hint"></div>
+          </div>
+        </div>
+        <!-- Create Folder inline form -->
+        <div id="create-folder-form" class="inline-form" style="display:none;">
+          <input type="text" id="new-folder-name" placeholder="Folder name" autocomplete="off">
+          <button class="btn btn-primary" id="btn-create-folder">Create</button>
+          <button class="btn btn-secondary" id="btn-cancel-create-folder">Cancel</button>
+        </div>
+        <!-- Drop Zone -->
+        <div id="drop-zone" class="drop-zone">
+          <div class="drop-zone-content">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#0ea5e9" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            <p>Drag and drop files here to upload</p>
+          </div>
+        </div>
+        <div class="table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th class="checkbox-col"><input type="checkbox" id="select-all"></th>
+                <th class="sortable" id="osort-name">Name <span class="sort-arrow">▲</span></th>
+                <th class="sortable" id="osort-size">Size <span class="sort-arrow"></span></th>
+                <th>Storage Class</th>
+                <th class="sortable" id="osort-date">Last Modified <span class="sort-arrow"></span></th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="object-list"></tbody>
+          </table>
+        </div>
+        <div id="pagination-controls" class="pagination-controls">
+          <button class="btn btn-secondary" id="btn-load-more" style="display:none;">Load More</button>
+        </div>
+      </div>
+
+      <!-- Object Detail View -->
+      <div id="object-view" class="view" style="display:none;">
+        <div class="object-detail-card">
+          <div class="object-detail-header">
+            <div class="object-icon">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#0ea5e9" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            </div>
+            <div>
+              <h2 id="object-name" class="object-title"></h2>
+              <span id="object-key" class="object-key"></span>
+            </div>
+          </div>
+          <div class="object-meta-grid">
+            <div class="meta-item"><span class="meta-label">Size</span><span class="meta-value" id="object-size"></span></div>
+            <div class="meta-item"><span class="meta-label">Storage Class</span><span class="meta-value" id="object-storage-class"></span></div>
+            <div class="meta-item"><span class="meta-label">Last Modified</span><span class="meta-value" id="object-modified"></span></div>
+            <div class="meta-item"><span class="meta-label">ETag</span><span class="meta-value" id="object-etag"></span></div>
+          </div>
+          <!-- IT Transition Timeline -->
+          <div id="it-timeline" class="it-timeline" style="display:none;">
+            <div class="it-timeline-title">Intelligent-Tiering Transition Timeline</div>
+            <div id="it-timeline-content"></div>
+          </div>
+          <div class="object-detail-actions">
+            <div class="tier-change">
+              <label for="new-tier">Change Storage Class:</label>
+              <select id="new-tier">
+                <option value="STANDARD">Standard</option>
+                <option value="STANDARD_IA">Standard-IA</option>
+                <option value="ONEZONE_IA">One Zone-IA</option>
+                <option value="INTELLIGENT_TIERING">Intelligent-Tiering</option>
+                <option value="GLACIER">Glacier Flexible Retrieval</option>
+                <option value="GLACIER_IR">Glacier Instant Retrieval</option>
+                <option value="DEEP_ARCHIVE">Glacier Deep Archive</option>
+              </select>
+              <button class="btn btn-secondary" id="btn-change-tier">Apply</button>
+              <label id="archive-optin-label" style="display:none;margin-left:0.5rem;font-size:0.8125rem;cursor:pointer;">
+                <input type="checkbox" id="archive-optin"> Enable Archive Access tiers (90d Archive, 180d Deep Archive)
+                <span style="display:block;font-size:0.75rem;color:#ea580c;margin-top:0.25rem;">Recommended for cost savings, but once in Deep Archive you need to restore first to access the object.</span>
+              </label>
+            </div>
+            <div class="action-buttons">
+              <button class="btn btn-icon" id="btn-delete-object" title="Open in S3 Console to delete">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+              </button>
+              <button class="btn btn-primary" id="btn-download-object">Download</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <div id="toast-container" class="toast-container"></div>
+    <div id="loading-overlay" class="loading-overlay">
+      <div class="spinner"></div>
+      <p id="loading-text">Loading...</p>
+    </div>
+    <div id="confirm-dialog" class="modal">
+      <div class="modal-content confirm-card">
+        <h3 id="confirm-title">Confirm</h3>
+        <p id="confirm-message"></p>
+        <div id="confirm-recommendation" class="transfer-recommendation" style="display:none;"></div>
+        <div class="confirm-actions">
+          <button class="btn btn-secondary" id="confirm-cancel">Cancel</button>
+          <button class="btn btn-danger" id="confirm-ok">Confirm</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Typed Confirmation Dialog (for destructive actions) -->
+    <div id="typed-confirm-dialog" class="modal">
+      <div class="modal-content confirm-card">
+        <h3 id="typed-confirm-title">Confirm</h3>
+        <p id="typed-confirm-message"></p>
+        <p id="typed-confirm-hint" style="font-size:0.8125rem;color:#64748b;margin-top:0.5rem;"></p>
+        <input type="text" id="typed-confirm-input" autocomplete="off" style="width:100%;padding:0.625rem 0.875rem;border:1.5px solid #e2e8f0;border-radius:8px;font-size:0.875rem;margin-top:0.5rem;box-sizing:border-box;">
+        <div class="confirm-actions" style="margin-top:1rem;">
+          <button class="btn btn-secondary" id="typed-confirm-cancel">Cancel</button>
+          <button class="btn btn-danger" id="typed-confirm-ok" disabled>Confirm</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Upload Modal -->
+    <div id="upload-modal" class="modal">
+      <div class="modal-content confirm-card" style="max-width:480px;">
+        <h3>Upload Files</h3>
+        <div id="upload-file-list" class="upload-file-list"></div>
+        <div id="upload-recommendation" class="transfer-recommendation" style="display:none;"></div>
+        <div class="form-group" style="margin-top:1rem;">
+          <label for="upload-storage-class" style="display:block;font-size:0.8125rem;font-weight:600;color:#64748b;margin-bottom:0.375rem;">Storage Class</label>
+          <select id="upload-storage-class" style="width:100%;padding:0.625rem 0.875rem;border:1.5px solid #e2e8f0;border-radius:8px;font-size:0.875rem;">
+            <option value="INTELLIGENT_TIERING" selected>Intelligent-Tiering — Auto-tiering (recommended)</option>
+            <option value="STANDARD">Standard — Frequent access</option>
+            <option value="STANDARD_IA">Standard-IA — Infrequent access</option>
+            <option value="ONEZONE_IA">One Zone-IA — Infrequent, single AZ</option>
+            <option value="GLACIER">Glacier Flexible Retrieval — Archive</option>
+            <option value="GLACIER_IR">Glacier Instant Retrieval — Archive, instant access</option>
+            <option value="DEEP_ARCHIVE">Glacier Deep Archive — Lowest cost</option>
+          </select>
+          <label id="upload-archive-optin-label" style="display:inline-flex;margin-top:0.5rem;font-size:0.8125rem;cursor:pointer;align-items:flex-start;gap:0.375rem;">
+            <input type="checkbox" id="upload-archive-optin" style="margin-top:2px;">
+            <span>Enable Archive Access tiers (90d Archive, 180d Deep Archive)<br>
+            <span style="font-size:0.75rem;color:#ea580c;">Recommended for cost savings, but once in Deep Archive you need to restore first to access the object.</span></span>
+          </label>
+          <a href="https://aws.amazon.com/s3/pricing/" target="_blank" rel="noopener" style="display:inline-block;margin-top:0.5rem;font-size:0.8125rem;color:#0ea5e9;">View S3 storage pricing →</a>
+        </div>
+        <div class="confirm-actions" style="margin-top:1.25rem;">
+          <button class="btn btn-secondary" id="upload-cancel">Cancel</button>
+          <button class="btn btn-primary" id="upload-confirm">Upload</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

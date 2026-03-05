@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+
+# Claude Code
+.claude/
+
+# Generated config (created by deploy.sh)
+website/config.js
+
+# Editor
+*.swp
+*.swo
+*~
+
+# Logs
+*.log

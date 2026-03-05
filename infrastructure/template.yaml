@@ -1,0 +1,1014 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  S3 Browser - CloudFront + Lambda API, protected by Cognito email OTP login
+  with SigV4-signed API calls. After deploy, add users via CLI.
+
+Parameters:
+  BucketName:
+    Type: String
+    Default: s3-browser-static-site
+    Description: Name for the S3 bucket hosting the static website
+
+Resources:
+  # ---- S3 Website Bucket ----
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${BucketName}-oac'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # ---- Cognito User Pool (email OTP, no password) ----
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${BucketName}-users'
+      AutoVerifiedAttributes: [email]
+      UsernameAttributes: [email]
+      MfaConfiguration: 'OFF'
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: false
+          RequireNumbers: false
+          RequireSymbols: false
+          RequireUppercase: false
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      LambdaConfig:
+        DefineAuthChallenge: !GetAtt CognitoAuthFn.Arn
+        CreateAuthChallenge: !GetAtt CognitoAuthFn.Arn
+        VerifyAuthChallengeResponse: !GetAtt CognitoAuthFn.Arn
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub '${BucketName}-client'
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_CUSTOM_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+
+  # ---- Cognito Auth Triggers (single Lambda for all 3 triggers) ----
+  CognitoAuthRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${BucketName}-cognito-auth-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SES
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ses:SendEmail
+                Resource: '*'
+
+  CognitoAuthFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${BucketName}-cognito-auth'
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 10
+      MemorySize: 128
+      Role: !GetAtt CognitoAuthRole.Arn
+      Code:
+        ZipFile: |
+          import json, random, boto3
+          ses = boto3.client('ses')
+          def handler(event, context):
+            trigger = event['triggerSource']
+            if trigger == 'DefineAuthChallenge_Authentication':
+              sessions = event['request'].get('session', [])
+              if not sessions:
+                event['response']['challengeName'] = 'CUSTOM_CHALLENGE'
+                event['response']['issueTokens'] = False
+                event['response']['failAuthentication'] = False
+              elif sessions[-1].get('challengeResult') == True:
+                event['response']['issueTokens'] = True
+                event['response']['failAuthentication'] = False
+              else:
+                event['response']['issueTokens'] = False
+                event['response']['failAuthentication'] = True
+            elif trigger == 'CreateAuthChallenge_Authentication':
+              code = str(random.randint(100000, 999999))
+              email = event['request']['userAttributes']['email']
+              ses.send_email(
+                Source=email,
+                Destination={'ToAddresses': [email]},
+                Message={
+                  'Subject': {'Data': 'S3 Browser - Your login code'},
+                  'Body': {'Text': {'Data': f'Your verification code is: {code}\n\nThis code expires in 5 minutes.'}}
+                })
+              event['response']['publicChallengeParameters'] = {'email': email}
+              event['response']['privateChallengeParameters'] = {'code': code}
+              event['response']['challengeMetadata'] = f'CODE-{code}'
+            elif trigger == 'VerifyAuthChallengeResponse_Authentication':
+              expected = event['request']['privateChallengeParameters']['code']
+              answer = event['request']['challengeAnswer']
+              event['response']['answerCorrect'] = (answer == expected)
+            return event
+
+  CognitoAuthPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CognitoAuthFn
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt UserPool.Arn
+
+  # ---- Cognito Identity Pool ----
+  IdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      IdentityPoolName: !Sub '${BucketName}-identity'
+      AllowUnauthenticatedIdentities: false
+      CognitoIdentityProviders:
+        - ClientId: !Ref UserPoolClient
+          ProviderName: !GetAtt UserPool.ProviderName
+
+  AuthenticatedRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${BucketName}-authenticated-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                cognito-identity.amazonaws.com:aud: !Ref IdentityPool
+              ForAnyValue:StringLike:
+                cognito-identity.amazonaws.com:amr: authenticated
+      Policies:
+        - PolicyName: ApiGatewayInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: execute-api:Invoke
+                Resource: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${S3BrowserApi}/prod/*'
+
+  IdentityPoolRoleAttachment:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId: !Ref IdentityPool
+      Roles:
+        authenticated: !GetAtt AuthenticatedRole.Arn
+
+  # ---- Auth Lambda@Edge ----
+  AuthEdgeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${BucketName}-auth-edge-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+                - edgelambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  AuthEdgeFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${BucketName}-auth-edge'
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Timeout: 5
+      MemorySize: 128
+      Role: !GetAtt AuthEdgeRole.Arn
+      Code:
+        ZipFile: !Sub |
+          'use strict';
+          const POOL_ID = '${UserPool}';
+          const REGION = '${AWS::Region}';
+          const ISS = 'https://cognito-idp.' + REGION + '.amazonaws.com/' + POOL_ID;
+
+          function parseCookies(headers) {
+            var c = {};
+            (headers.cookie || []).forEach(function(h) {
+              h.value.split(';').forEach(function(p) {
+                var parts = p.trim().split('=');
+                var k = parts.shift();
+                c[k] = parts.join('=');
+              });
+            });
+            return c;
+          }
+
+          function decodeJwtPayload(token) {
+            try {
+              var parts = token.split('.');
+              if (parts.length !== 3) return null;
+              var payload = parts[1];
+              payload = payload.replace(/-/g, '+').replace(/_/g, '/');
+              while (payload.length % 4) payload += '=';
+              var json = Buffer.from(payload, 'base64').toString('utf8');
+              return JSON.parse(json);
+            } catch (e) {
+              return null;
+            }
+          }
+
+          function isValidToken(token) {
+            if (!token) return false;
+            var payload = decodeJwtPayload(token);
+            if (!payload) return false;
+            if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) return false;
+            if (payload.iss && payload.iss !== ISS) return false;
+            return payload;
+          }
+
+          exports.handler = async function(event) {
+            var request = event.Records[0].cf.request;
+            var uri = request.uri;
+            var cookies = parseCookies(request.headers);
+
+            if (uri === '/login.html' || uri.endsWith('.js') || uri.endsWith('.css') || uri === '/favicon.ico') {
+              return request;
+            }
+
+            var token = cookies['s3b_id_token'];
+            var payload = isValidToken(token);
+            if (payload) {
+              return request;
+            }
+
+            return {
+              status: '302',
+              statusDescription: 'Found',
+              headers: {
+                location: [{ key: 'Location', value: '/login.html' }],
+                'cache-control': [{ key: 'Cache-Control', value: 'no-cache, no-store, must-revalidate' }]
+              },
+              body: ''
+            };
+          };
+
+  AuthEdgeFunctionVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref AuthEdgeFunction
+
+  # ---- CloudFront Distribution ----
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt WebsiteBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt CloudFrontOAC.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+          - Id: ApiOrigin
+            DomainName: !Sub '${S3BrowserApi}.execute-api.${AWS::Region}.amazonaws.com'
+            OriginPath: /prod
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              HTTPSPort: 443
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: whitelist
+              WhitelistedNames:
+                - s3b_id_token
+          Compress: true
+          LambdaFunctionAssociations:
+            - EventType: viewer-request
+              LambdaFunctionARN: !Ref AuthEdgeFunctionVersion
+        CacheBehaviors:
+          - PathPattern: /api/*
+            TargetOriginId: ApiOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachedMethods: [GET, HEAD]
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+        PriceClass: PriceClass_100
+
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipal
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${WebsiteBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}'
+
+  # ---- S3 Browser API Lambda ----
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${BucketName}-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [s3:ListAllMyBuckets, s3:GetBucketLocation]
+                Resource: '*'
+              - Effect: Allow
+                Action: [cloudwatch:GetMetricData, cloudwatch:ListMetrics]
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:ListBucketVersions
+                  - s3:GetBucketVersioning
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:DeleteObjectVersion
+                  - s3:DeleteBucket
+                  - s3:CreateBucket
+                  - s3:GetBucketCors
+                  - s3:PutBucketCors
+                  - s3:GetIntelligentTieringConfiguration
+                  - s3:PutIntelligentTieringConfiguration
+                  - s3:GetLifecycleConfiguration
+                  - s3:PutLifecycleConfiguration
+                  - s3:DeleteBucketLifecycle
+                Resource: ['arn:aws:s3:::*', 'arn:aws:s3:::*/*']
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${BucketName}-api'
+
+  S3BrowserFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${BucketName}-api'
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Timeout: 900
+      MemorySize: 256
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          SELF_FUNCTION_NAME: !Sub '${BucketName}-api'
+      Code:
+        ZipFile: |
+          import json, boto3, os
+          from datetime import datetime, timedelta, timezone
+          s3 = boto3.client('s3')
+          cw = boto3.client('cloudwatch')
+          lam = boto3.client('lambda')
+          _region_cache = {}
+          _s3_clients = {}
+          _cw_clients = {}
+          def get_bucket_region(bucket):
+            if bucket in _region_cache: return _region_cache[bucket]
+            loc = s3.get_bucket_location(Bucket=bucket).get('LocationConstraint') or 'us-east-1'
+            _region_cache[bucket] = loc
+            return loc
+          def s3_for(bucket):
+            region = get_bucket_region(bucket)
+            if region not in _s3_clients: _s3_clients[region] = boto3.client('s3', region_name=region)
+            return _s3_clients[region]
+          def cw_for(region):
+            if region not in _cw_clients: _cw_clients[region] = boto3.client('cloudwatch', region_name=region)
+            return _cw_clients[region]
+          H = {'Access-Control-Allow-Origin':'*','Access-Control-Allow-Methods':'GET,POST,PUT,DELETE,OPTIONS','Access-Control-Allow-Headers':'Content-Type,Authorization,X-Amz-Date,X-Amz-Security-Token,X-Amz-User-Agent','Content-Type':'application/json'}
+          def r(c, b): return {'statusCode':c,'headers':H,'body':json.dumps(b,default=str)}
+          def get_metrics(buckets):
+            now = datetime.now(timezone.utc); start = now - timedelta(days=2)
+            total_size = 0; total_objects = 0
+            storage_types = ['StandardStorage','IntelligentTieringFAStorage','IntelligentTieringIAStorage','StandardIAStorage','OneZoneIAStorage','GlacierStorage','DeepArchiveStorage','GlacierInstantRetrievalStorage']
+            # Group buckets by region
+            by_region = {}
+            for b in buckets:
+              try: region = get_bucket_region(b['Name'])
+              except: continue
+              if region not in by_region: by_region[region] = []
+              by_region[region].append(b)
+            # Query CloudWatch in each region
+            for region, region_buckets in by_region.items():
+              rcw = cw_for(region); queries = []
+              for i, b in enumerate(region_buckets):
+                for j, st in enumerate(storage_types):
+                  queries.append({'Id':f's{i}x{j}','MetricStat':{'Metric':{'Namespace':'AWS/S3','MetricName':'BucketSizeBytes','Dimensions':[{'Name':'BucketName','Value':b['Name']},{'Name':'StorageType','Value':st}]},'Period':86400,'Stat':'Average'},'ReturnData':True})
+                queries.append({'Id':f'o{i}','MetricStat':{'Metric':{'Namespace':'AWS/S3','MetricName':'NumberOfObjects','Dimensions':[{'Name':'BucketName','Value':b['Name']},{'Name':'StorageType','Value':'AllStorageTypes'}]},'Period':86400,'Stat':'Average'},'ReturnData':True})
+                if len(queries) >= 490:
+                  for mr in rcw.get_metric_data(MetricDataQueries=queries,StartTime=start,EndTime=now)['MetricDataResults']:
+                    if mr.get('Values'):
+                      if mr['Id'][0]=='s': total_size += mr['Values'][0]
+                      elif mr['Id'][0]=='o': total_objects += int(mr['Values'][0])
+                  queries = []
+              if queries:
+                for mr in rcw.get_metric_data(MetricDataQueries=queries,StartTime=start,EndTime=now)['MetricDataResults']:
+                  if mr.get('Values'):
+                    if mr['Id'][0]=='s': total_size += mr['Values'][0]
+                    elif mr['Id'][0]=='o': total_objects += int(mr['Values'][0])
+            return {'totalBuckets':len(buckets),'totalObjects':total_objects,'totalSize':total_size}
+          def lambda_handler(event, context):
+            path = event.get('pathParameters',{}).get('proxy','')
+            method = event.get('httpMethod','GET')
+            qs = event.get('queryStringParameters') or {}
+            body = {}
+            if event.get('body'):
+              try: body = json.loads(event['body'])
+              except: body = {}
+            if method == 'OPTIONS': return r(200, {})
+            try:
+              if path == 'metrics' and method == 'GET':
+                return r(200, get_metrics(s3.list_buckets().get('Buckets',[])))
+              if path == 'storage-breakdown' and method == 'GET':
+                buckets = s3.list_buckets().get('Buckets',[])
+                now = datetime.now(timezone.utc); start = now - timedelta(days=2)
+                tier_map = {'std':'StandardStorage','itfa':'IntelligentTieringFAStorage','itia':'IntelligentTieringIAStorage','sia':'StandardIAStorage','ozia':'OneZoneIAStorage','glc':'GlacierStorage','da':'DeepArchiveStorage','gir':'GlacierInstantRetrievalStorage'}
+                tier_sizes = {k:0 for k in tier_map}
+                # Group buckets by region
+                by_region = {}
+                for b in buckets:
+                  try: region = get_bucket_region(b['Name'])
+                  except: continue
+                  if region not in by_region: by_region[region] = []
+                  by_region[region].append(b)
+                # Query CloudWatch in each region
+                for region, region_buckets in by_region.items():
+                  rcw = cw_for(region); queries = []
+                  for i, b in enumerate(region_buckets):
+                    for k, st in tier_map.items():
+                      queries.append({'Id':f'{k}{i}','MetricStat':{'Metric':{'Namespace':'AWS/S3','MetricName':'BucketSizeBytes','Dimensions':[{'Name':'BucketName','Value':b['Name']},{'Name':'StorageType','Value':st}]},'Period':86400,'Stat':'Average'},'ReturnData':True})
+                    if len(queries) >= 490:
+                      for mr in rcw.get_metric_data(MetricDataQueries=queries,StartTime=start,EndTime=now)['MetricDataResults']:
+                        if mr.get('Values'):
+                          prefix = ''.join(c for c in mr['Id'] if not c.isdigit())
+                          tier_sizes[prefix] = tier_sizes.get(prefix,0) + mr['Values'][0]
+                      queries = []
+                  if queries:
+                    for mr in rcw.get_metric_data(MetricDataQueries=queries,StartTime=start,EndTime=now)['MetricDataResults']:
+                      if mr.get('Values'):
+                        prefix = ''.join(c for c in mr['Id'] if not c.isdigit())
+                        tier_sizes[prefix] = tier_sizes.get(prefix,0) + mr['Values'][0]
+                labels = {'std':'Standard','itfa':'Intelligent-Tiering (FA)','itia':'Intelligent-Tiering (IA)','sia':'Standard-IA','ozia':'One Zone-IA','glc':'Glacier Flexible','da':'Deep Archive','gir':'Glacier Instant'}
+                tiers = {labels[k]:v for k,v in tier_sizes.items() if v > 0}
+                total = sum(tiers.values())
+                return r(200, {'tiers':tiers,'totalSize':total,'bucketCount':len(buckets)})
+              if path == 'lifecycle-status' and method == 'GET':
+                buckets = s3.list_buckets().get('Buckets',[])
+                enabled = 0; disabled = 0; details = []
+                for b in buckets:
+                  try:
+                    rs = s3_for(b['Name'])
+                    rules = rs.get_bucket_lifecycle_configuration(Bucket=b['Name']).get('Rules',[])
+                    has_it = any(r.get('Status')=='Enabled' and any(t.get('StorageClass')=='INTELLIGENT_TIERING' for t in r.get('Transitions',[])) for r in rules)
+                  except rs.exceptions.ClientError as e:
+                    if 'NoSuchLifecycleConfiguration' in str(e): has_it = False
+                    else: has_it = False
+                  except: has_it = False
+                  if has_it: enabled += 1
+                  else: disabled += 1
+                  details.append({'Name':b['Name'],'autoTiering':has_it})
+                return r(200, {'total':len(buckets),'enabled':enabled,'disabled':disabled,'buckets':details})
+              if path == 'lifecycle-enable' and method == 'POST':
+                target = body.get('buckets','all')
+                sc = body.get('storageClass','INTELLIGENT_TIERING')
+                days = body.get('days',0)
+                rule_id = body.get('ruleId','AutoIntelligentTiering')
+                prefix_filter = body.get('prefix','')
+                buckets = s3.list_buckets().get('Buckets',[])
+                if target != 'all': buckets = [b for b in buckets if b['Name'] in target]
+                if body.get('_async_worker'):
+                  applied = 0; skipped = 0; errors = 0
+                  for b in buckets:
+                    try:
+                      rs = s3_for(b['Name'])
+                      try: rules = rs.get_bucket_lifecycle_configuration(Bucket=b['Name']).get('Rules',[])
+                      except: rules = []
+                      has_it = any(r.get('ID')==rule_id and r.get('Status')=='Enabled' for r in rules)
+                      if has_it: skipped += 1; continue
+                      rules = [r for r in rules if r.get('ID') != rule_id]
+                      rules.append({'ID':rule_id,'Status':'Enabled','Filter':{'Prefix':prefix_filter},'Transitions':[{'Days':days,'StorageClass':sc}]})
+                      rs.put_bucket_lifecycle_configuration(Bucket=b['Name'],LifecycleConfiguration={'Rules':rules})
+                      applied += 1
+                    except: errors += 1
+                  return r(200, {'applied':applied,'skipped':skipped,'errors':errors})
+                if len(buckets) > 5:
+                  lam.invoke(FunctionName=os.environ['SELF_FUNCTION_NAME'],InvocationType='Event',Payload=json.dumps({'pathParameters':{'proxy':'lifecycle-enable'},'httpMethod':'POST','body':json.dumps({**body,'_async_worker':True}),'queryStringParameters':{}}))
+                  return r(200, {'async':True,'message':f'Applying lifecycle rule to {len(buckets)} buckets in the background.'})
+                applied = 0; skipped = 0; errors = 0
+                for b in buckets:
+                  try:
+                    rs = s3_for(b['Name'])
+                    try: rules = rs.get_bucket_lifecycle_configuration(Bucket=b['Name']).get('Rules',[])
+                    except: rules = []
+                    has_it = any(r.get('ID')==rule_id and r.get('Status')=='Enabled' for r in rules)
+                    if has_it: skipped += 1; continue
+                    rules = [r for r in rules if r.get('ID') != rule_id]
+                    rules.append({'ID':rule_id,'Status':'Enabled','Filter':{'Prefix':prefix_filter},'Transitions':[{'Days':days,'StorageClass':sc}]})
+                    rs.put_bucket_lifecycle_configuration(Bucket=b['Name'],LifecycleConfiguration={'Rules':rules})
+                    applied += 1
+                  except: errors += 1
+                return r(200, {'applied':applied,'skipped':skipped,'errors':errors})
+              if path == 'lifecycle-disable' and method == 'POST':
+                target = body.get('buckets','all')
+                rule_id = body.get('ruleId','AutoIntelligentTiering')
+                buckets = s3.list_buckets().get('Buckets',[])
+                if target != 'all': buckets = [b for b in buckets if b['Name'] in target]
+                if body.get('_async_worker'):
+                  removed = 0; errors = 0
+                  for b in buckets:
+                    try:
+                      rs = s3_for(b['Name'])
+                      try: rules = rs.get_bucket_lifecycle_configuration(Bucket=b['Name']).get('Rules',[])
+                      except: continue
+                      filtered = [r for r in rules if r.get('ID') != rule_id]
+                      if len(filtered) == len(rules): continue
+                      if filtered: rs.put_bucket_lifecycle_configuration(Bucket=b['Name'],LifecycleConfiguration={'Rules':filtered})
+                      else: rs.delete_bucket_lifecycle(Bucket=b['Name'])
+                      removed += 1
+                    except: errors += 1
+                  return r(200, {'removed':removed,'errors':errors})
+                if len(buckets) > 5:
+                  lam.invoke(FunctionName=os.environ['SELF_FUNCTION_NAME'],InvocationType='Event',Payload=json.dumps({'pathParameters':{'proxy':'lifecycle-disable'},'httpMethod':'POST','body':json.dumps({**body,'_async_worker':True}),'queryStringParameters':{}}))
+                  return r(200, {'async':True,'message':f'Removing lifecycle rule from {len(buckets)} buckets in the background.'})
+                removed = 0; errors = 0
+                for b in buckets:
+                  try:
+                    rs = s3_for(b['Name'])
+                    try: rules = rs.get_bucket_lifecycle_configuration(Bucket=b['Name']).get('Rules',[])
+                    except: continue
+                    filtered = [r for r in rules if r.get('ID') != rule_id]
+                    if len(filtered) == len(rules): continue
+                    if filtered: rs.put_bucket_lifecycle_configuration(Bucket=b['Name'],LifecycleConfiguration={'Rules':filtered})
+                    else: rs.delete_bucket_lifecycle(Bucket=b['Name'])
+                    removed += 1
+                  except: errors += 1
+                return r(200, {'removed':removed,'errors':errors})
+              if path == 'bucket-sizes' and method == 'GET':
+                buckets = s3.list_buckets().get('Buckets',[])
+                now = datetime.now(timezone.utc); start = now - timedelta(days=2)
+                sizes = {}
+                storage_types = ['StandardStorage','IntelligentTieringFAStorage','IntelligentTieringIAStorage','StandardIAStorage','OneZoneIAStorage','GlacierStorage','DeepArchiveStorage','GlacierInstantRetrievalStorage']
+                # Group buckets by region
+                by_region = {}
+                for b in buckets:
+                  sizes[b['Name']] = 0
+                  try: region = get_bucket_region(b['Name'])
+                  except: continue
+                  if region not in by_region: by_region[region] = []
+                  by_region[region].append(b)
+                # Query CloudWatch in each region
+                for region, region_buckets in by_region.items():
+                  rcw = cw_for(region); queries = []
+                  for i, b in enumerate(region_buckets):
+                    for j, st in enumerate(storage_types):
+                      queries.append({'Id':f'b{i}x{j}','MetricStat':{'Metric':{'Namespace':'AWS/S3','MetricName':'BucketSizeBytes','Dimensions':[{'Name':'BucketName','Value':b['Name']},{'Name':'StorageType','Value':st}]},'Period':86400,'Stat':'Average'},'ReturnData':True})
+                    if len(queries) >= 490:
+                      for mr in rcw.get_metric_data(MetricDataQueries=queries,StartTime=start,EndTime=now)['MetricDataResults']:
+                        if mr.get('Values'):
+                          idx = int(mr['Id'].split('x')[0][1:])
+                          sizes[region_buckets[idx]['Name']] = sizes.get(region_buckets[idx]['Name'],0) + mr['Values'][0]
+                      queries = []
+                  if queries:
+                    for mr in rcw.get_metric_data(MetricDataQueries=queries,StartTime=start,EndTime=now)['MetricDataResults']:
+                      if mr.get('Values'):
+                        idx = int(mr['Id'].split('x')[0][1:])
+                        sizes[region_buckets[idx]['Name']] = sizes.get(region_buckets[idx]['Name'],0) + mr['Values'][0]
+                return r(200, {'sizes':sizes})
+              if path == 'buckets/search' and method == 'GET':
+                q = (qs.get('q','') or '').lower()
+                matches = [b for b in s3.list_buckets().get('Buckets',[]) if q in b['Name'].lower()][:50]
+                result = []
+                for b in matches:
+                  try: region = get_bucket_region(b['Name'])
+                  except: region = 'unknown'
+                  result.append({'Name':b['Name'],'CreationDate':b['CreationDate'].isoformat(),'Region':region})
+                return r(200, {'Buckets':result})
+              if path == 'buckets' and method == 'GET':
+                buckets = s3.list_buckets().get('Buckets',[])
+                result = []
+                for b in buckets:
+                  try: region = get_bucket_region(b['Name'])
+                  except: region = 'unknown'
+                  result.append({'Name':b['Name'],'CreationDate':b['CreationDate'].isoformat(),'Region':region})
+                return r(200, {'Buckets':result})
+              if path == 'buckets' and method == 'POST':
+                name = body.get('name',''); opts = {'Bucket':name}; region = body.get('region','us-east-1')
+                if region != 'us-east-1': opts['CreateBucketConfiguration'] = {'LocationConstraint':region}
+                s3.create_bucket(**opts); return r(200, {'message':f'Bucket {name} created'})
+              if not path.startswith('buckets/'): return r(404, {'error':'Not found'})
+              bucket = path.split('/')[1]; sub = '/'.join(path.split('/')[2:]); rs3 = s3_for(bucket)
+              if sub == 'location' and method == 'GET':
+                return r(200, {'Region': get_bucket_region(bucket)})
+              if sub == 'objects' and method == 'GET':
+                p = {'Bucket':bucket,'MaxKeys':int(qs.get('maxKeys','50'))}
+                if qs.get('prefix'): p['Prefix'] = qs['prefix']
+                if qs.get('delimiter'): p['Delimiter'] = qs['delimiter']
+                if qs.get('continuationToken'): p['ContinuationToken'] = qs['continuationToken']
+                res = rs3.list_objects_v2(**p)
+                return r(200, {'Contents':[{'Key':o['Key'],'Size':o['Size'],'StorageClass':o.get('StorageClass','STANDARD'),'LastModified':o['LastModified'].isoformat()} for o in res.get('Contents',[])],'CommonPrefixes':[px['Prefix'] for px in res.get('CommonPrefixes',[])],'IsTruncated':res.get('IsTruncated',False),'NextContinuationToken':res.get('NextContinuationToken')})
+              if sub == 'object-detail' and method == 'GET':
+                res = rs3.head_object(Bucket=bucket, Key=qs.get('key','')); sc = res.get('StorageClass','STANDARD')
+                out = {'ContentLength':res['ContentLength'],'StorageClass':sc,'LastModified':res['LastModified'].isoformat(),'ETag':res.get('ETag',''),'ContentType':res.get('ContentType','')}
+                if sc == 'INTELLIGENT_TIERING':
+                  out['ArchiveStatus'] = res.get('ArchiveStatus','')
+                  try:
+                    tiers = rs3.get_bucket_intelligent_tiering_configuration(Bucket=bucket, Id='AutoArchive').get('IntelligentTieringConfiguration',{}).get('Tierings',[])
+                    out['ITConfig'] = [{'AccessTier':t['AccessTier'],'Days':t['Days']} for t in tiers]
+                  except: out['ITConfig'] = []
+                return r(200, out)
+              if sub == 'download' and method == 'GET':
+                try: rs3.get_bucket_cors(Bucket=bucket)
+                except: rs3.put_bucket_cors(Bucket=bucket,CORSConfiguration={'CORSRules':[{'AllowedHeaders':['*'],'AllowedMethods':['GET','PUT','POST','DELETE','HEAD'],'AllowedOrigins':['*'],'MaxAgeSeconds':3600}]})
+                return r(200, {'url':rs3.generate_presigned_url('get_object',Params={'Bucket':bucket,'Key':qs.get('key','')},ExpiresIn=3600)})
+              if sub == 'object' and method == 'DELETE':
+                rs3.delete_object(Bucket=bucket, Key=qs.get('key','')); return r(200, {'message':'Deleted'})
+              if sub == '' and method == 'DELETE':
+                rs3.delete_bucket(Bucket=bucket); return r(200, {'message':'Bucket deleted'})
+              if sub == 'change-tier' and method == 'POST':
+                sc = body.get('storageClass','STANDARD'); key = body.get('key','')
+                if key and not body.get('skipCopy'): rs3.copy_object(Bucket=bucket,CopySource=f"{bucket}/{key}",Key=key,StorageClass=sc,MetadataDirective='COPY')
+                if sc == 'INTELLIGENT_TIERING' and body.get('archiveOptIn'):
+                  try: rs3.put_bucket_intelligent_tiering_configuration(Bucket=bucket,Id='AutoArchive',IntelligentTieringConfiguration={'Id':'AutoArchive','Status':'Enabled','Tierings':[{'AccessTier':'ARCHIVE_ACCESS','Days':90},{'AccessTier':'DEEP_ARCHIVE_ACCESS','Days':180}]})
+                  except: pass
+                return r(200, {'message':f'Changed to {sc}'})
+              if sub == 'storage-breakdown' and method == 'GET':
+                import time
+                prefix = qs.get('prefix','')
+                std_count = 0; std_size = 0; total_count = 0; total_size = 0
+                params = {'Bucket':bucket}
+                if prefix: params['Prefix'] = prefix
+                t0 = time.time(); partial = False
+                while True:
+                  res = rs3.list_objects_v2(**params)
+                  for o in res.get('Contents',[]):
+                    sc = o.get('StorageClass','STANDARD'); sz = o['Size']
+                    total_count += 1; total_size += sz
+                    if sc == 'STANDARD': std_count += 1; std_size += sz
+                  if not res.get('IsTruncated'): break
+                  if time.time() - t0 > 20: partial = True; break
+                  params['ContinuationToken'] = res['NextContinuationToken']
+                return r(200, {'standardCount':std_count,'standardSize':std_size,'totalCount':total_count,'totalSize':total_size,'partial':partial})
+              if sub == 'bulk-convert-it' and method == 'POST':
+                prefix = body.get('prefix','')
+                # If this is an async worker invocation, do the full conversion
+                if body.get('_async_worker'):
+                  converted = 0; errors = 0
+                  params = {'Bucket':bucket}
+                  if prefix: params['Prefix'] = prefix
+                  while True:
+                    res = rs3.list_objects_v2(**params)
+                    for o in res.get('Contents',[]):
+                      if o.get('StorageClass','STANDARD') == 'STANDARD' and o['Size'] > 0:
+                        try:
+                          rs3.copy_object(Bucket=bucket,CopySource=f"{bucket}/{o['Key']}",Key=o['Key'],StorageClass='INTELLIGENT_TIERING',MetadataDirective='COPY')
+                          converted += 1
+                        except: errors += 1
+                    if not res.get('IsTruncated'): break
+                    params['ContinuationToken'] = res['NextContinuationToken']
+                  if body.get('archiveOptIn'):
+                    try: rs3.put_bucket_intelligent_tiering_configuration(Bucket=bucket,Id='AutoArchive',IntelligentTieringConfiguration={'Id':'AutoArchive','Status':'Enabled','Tierings':[{'AccessTier':'ARCHIVE_ACCESS','Days':90},{'AccessTier':'DEEP_ARCHIVE_ACCESS','Days':180}]})
+                    except: pass
+                  return r(200, {'converted':converted,'errors':errors})
+                # Count STANDARD objects first
+                std_count = 0
+                params = {'Bucket':bucket}
+                if prefix: params['Prefix'] = prefix
+                keys = []
+                while True:
+                  res = rs3.list_objects_v2(**params)
+                  for o in res.get('Contents',[]):
+                    if o.get('StorageClass','STANDARD') == 'STANDARD' and o['Size'] > 0:
+                      std_count += 1
+                      if std_count <= 25: keys.append(o['Key'])
+                  if not res.get('IsTruncated'): break
+                  params['ContinuationToken'] = res['NextContinuationToken']
+                if std_count == 0:
+                  return r(200, {'converted':0,'errors':0,'async':False})
+                if std_count <= 25:
+                  converted = 0; errors = 0
+                  for k in keys:
+                    try:
+                      rs3.copy_object(Bucket=bucket,CopySource=f"{bucket}/{k}",Key=k,StorageClass='INTELLIGENT_TIERING',MetadataDirective='COPY')
+                      converted += 1
+                    except: errors += 1
+                  if body.get('archiveOptIn'):
+                    try: rs3.put_bucket_intelligent_tiering_configuration(Bucket=bucket,Id='AutoArchive',IntelligentTieringConfiguration={'Id':'AutoArchive','Status':'Enabled','Tierings':[{'AccessTier':'ARCHIVE_ACCESS','Days':90},{'AccessTier':'DEEP_ARCHIVE_ACCESS','Days':180}]})
+                    except: pass
+                  return r(200, {'converted':converted,'errors':errors,'async':False})
+                # More than 100 — invoke self asynchronously
+                lam.invoke(FunctionName=os.environ['SELF_FUNCTION_NAME'],InvocationType='Event',Payload=json.dumps({'pathParameters':{'proxy':f'buckets/{bucket}/bulk-convert-it'},'httpMethod':'POST','body':json.dumps({'prefix':prefix,'archiveOptIn':body.get('archiveOptIn',False),'_async_worker':True}),'queryStringParameters':{}}))
+                return r(200, {'async':True,'totalObjects':std_count,'message':f'Converting {std_count} objects in the background. Refresh in a few minutes to check progress.'})
+              if sub == 'lifecycle' and method == 'GET':
+                try:
+                  rules = rs3.get_bucket_lifecycle_configuration(Bucket=bucket).get('Rules',[])
+                except: rules = []
+                result = []
+                for rule in rules:
+                  transitions = rule.get('Transitions',[])
+                  for t in transitions:
+                    result.append({'id':rule.get('ID',''),'status':rule.get('Status',''),'prefix':rule.get('Filter',{}).get('Prefix',''),'days':t.get('Days',0),'storageClass':t.get('StorageClass','')})
+                return r(200, {'rules':result})
+              if sub == 'lifecycle' and method == 'POST':
+                sc = body.get('storageClass','INTELLIGENT_TIERING')
+                days = body.get('days',0)
+                prefix_filter = body.get('prefix','')
+                rule_id = body.get('ruleId', f'S3B-{sc}')
+                try: rules = rs3.get_bucket_lifecycle_configuration(Bucket=bucket).get('Rules',[])
+                except: rules = []
+                rules = [r for r in rules if r.get('ID') != rule_id]
+                rules.append({'ID':rule_id,'Status':'Enabled','Filter':{'Prefix':prefix_filter},'Transitions':[{'Days':days,'StorageClass':sc}]})
+                rs3.put_bucket_lifecycle_configuration(Bucket=bucket,LifecycleConfiguration={'Rules':rules})
+                return r(200, {'message':f'Lifecycle rule added: transition to {sc} after {days} days'})
+              if sub == 'lifecycle' and method == 'DELETE':
+                rule_id = qs.get('ruleId','')
+                if not rule_id: return r(400, {'error':'ruleId required'})
+                try: rules = rs3.get_bucket_lifecycle_configuration(Bucket=bucket).get('Rules',[])
+                except: return r(200, {'message':'No rules to remove'})
+                filtered = [r for r in rules if r.get('ID') != rule_id]
+                if len(filtered) == len(rules): return r(200, {'message':'Rule not found'})
+                if filtered: rs3.put_bucket_lifecycle_configuration(Bucket=bucket,LifecycleConfiguration={'Rules':filtered})
+                else: rs3.delete_bucket_lifecycle(Bucket=bucket)
+                return r(200, {'message':'Rule removed'})
+              if sub == 'version-info' and method == 'GET':
+                import time
+                # Check if versioning is enabled
+                try:
+                  vs = rs3.get_bucket_versioning(Bucket=bucket)
+                  status = vs.get('Status','')
+                except: status = ''
+                if status not in ('Enabled','Suspended'):
+                  return r(200, {'versioned':False,'deleteMarkers':0,'nonCurrentVersions':0,'nonCurrentSize':0})
+                dm_count = 0; nc_count = 0; nc_size = 0
+                params = {'Bucket':bucket}
+                prefix = qs.get('prefix','')
+                if prefix: params['Prefix'] = prefix
+                t0 = time.time(); partial = False
+                while True:
+                  res = rs3.list_object_versions(**params)
+                  for d in res.get('DeleteMarkers',[]):
+                    if d.get('IsLatest',False): dm_count += 1
+                  for v in res.get('Versions',[]):
+                    if not v.get('IsLatest',False):
+                      nc_count += 1; nc_size += v.get('Size',0)
+                  if not res.get('IsTruncated'): break
+                  if time.time() - t0 > 20: partial = True; break
+                  params['KeyMarker'] = res.get('NextKeyMarker','')
+                  vid = res.get('NextVersionIdMarker','')
+                  if vid: params['VersionIdMarker'] = vid
+                return r(200, {'versioned':True,'deleteMarkers':dm_count,'nonCurrentVersions':nc_count,'nonCurrentSize':nc_size,'partial':partial})
+              if sub == 'cleanup-versions' and method == 'POST':
+                import time
+                mode = body.get('mode','all')
+                prefix = body.get('prefix','')
+                if body.get('_async_worker'):
+                  dm_del = 0; ver_del = 0; errors = 0
+                  params = {'Bucket':bucket}
+                  if prefix: params['Prefix'] = prefix
+                  while True:
+                    res = rs3.list_object_versions(**params)
+                    to_delete = []
+                    if mode in ('all','markers'):
+                      for d in res.get('DeleteMarkers',[]):
+                        if d.get('IsLatest',False):
+                          to_delete.append({'Key':d['Key'],'VersionId':d['VersionId']})
+                          dm_del += 1
+                    if mode in ('all','versions'):
+                      for v in res.get('Versions',[]):
+                        if not v.get('IsLatest',False):
+                          to_delete.append({'Key':v['Key'],'VersionId':v['VersionId']})
+                          ver_del += 1
+                    if to_delete:
+                      for i in range(0, len(to_delete), 1000):
+                        batch = to_delete[i:i+1000]
+                        try: rs3.delete_objects(Bucket=bucket,Delete={'Objects':batch,'Quiet':True})
+                        except: errors += len(batch)
+                    if not res.get('IsTruncated'): break
+                    params['KeyMarker'] = res.get('NextKeyMarker','')
+                    vid = res.get('NextVersionIdMarker','')
+                    if vid: params['VersionIdMarker'] = vid
+                  return r(200, {'deleteMarkers':dm_del,'versions':ver_del,'errors':errors})
+                # Quick count to decide sync vs async
+                count = 0
+                params = {'Bucket':bucket}
+                if prefix: params['Prefix'] = prefix
+                t0 = time.time()
+                while True:
+                  res = rs3.list_object_versions(**params)
+                  for d in res.get('DeleteMarkers',[]): count += 1
+                  for v in res.get('Versions',[]): count += 1
+                  if not res.get('IsTruncated') or time.time() - t0 > 5: break
+                  params['KeyMarker'] = res.get('NextKeyMarker','')
+                  vid = res.get('NextVersionIdMarker','')
+                  if vid: params['VersionIdMarker'] = vid
+                if count > 500:
+                  lam.invoke(FunctionName=os.environ['SELF_FUNCTION_NAME'],InvocationType='Event',Payload=json.dumps({'pathParameters':{'proxy':f'buckets/{bucket}/cleanup-versions'},'httpMethod':'POST','body':json.dumps({'prefix':prefix,'mode':mode,'_async_worker':True}),'queryStringParameters':{}}))
+                  return r(200, {'async':True,'message':f'Cleaning up versions in the background (~{count} items). Refresh in a few minutes.'})
+                # Small enough to do inline
+                dm_del = 0; ver_del = 0; errors = 0
+                params = {'Bucket':bucket}
+                if prefix: params['Prefix'] = prefix
+                while True:
+                  res = rs3.list_object_versions(**params)
+                  to_delete = []
+                  if mode in ('all','markers'):
+                    for d in res.get('DeleteMarkers',[]):
+                      if d.get('IsLatest',False):
+                        to_delete.append({'Key':d['Key'],'VersionId':d['VersionId']})
+                        dm_del += 1
+                  if mode in ('all','versions'):
+                    for v in res.get('Versions',[]):
+                      if not v.get('IsLatest',False):
+                        to_delete.append({'Key':v['Key'],'VersionId':v['VersionId']})
+                        ver_del += 1
+                  if to_delete:
+                    for i in range(0, len(to_delete), 1000):
+                      batch = to_delete[i:i+1000]
+                      try: rs3.delete_objects(Bucket=bucket,Delete={'Objects':batch,'Quiet':True})
+                      except: errors += len(batch)
+                  if not res.get('IsTruncated'): break
+                  params['KeyMarker'] = res.get('NextKeyMarker','')
+                  vid = res.get('NextVersionIdMarker','')
+                  if vid: params['VersionIdMarker'] = vid
+                return r(200, {'async':False,'deleteMarkers':dm_del,'versions':ver_del,'errors':errors})
+              if sub == 'folder' and method == 'POST':
+                key = body.get('key','')
+                if not key.endswith('/'): key += '/'
+                rs3.put_object(Bucket=bucket, Key=key, Body=b''); return r(200, {'message':'Folder created'})
+              if sub == 'upload-url' and method == 'POST':
+                key = body.get('key',''); ct = body.get('contentType','application/octet-stream'); sc = body.get('storageClass','STANDARD')
+                try: rs3.get_bucket_cors(Bucket=bucket)
+                except: rs3.put_bucket_cors(Bucket=bucket,CORSConfiguration={'CORSRules':[{'AllowedHeaders':['*'],'AllowedMethods':['GET','PUT','POST','DELETE','HEAD'],'AllowedOrigins':['*'],'MaxAgeSeconds':3600}]})
+                params = {'Bucket':bucket,'Key':key,'ContentType':ct}
+                if sc and sc != 'STANDARD': params['StorageClass'] = sc
+                return r(200, {'url':rs3.generate_presigned_url('put_object',Params=params,ExpiresIn=3600)})
+              return r(404, {'error':f'Not found: {method} {path}'})
+            except Exception as e: return r(500, {'error':str(e)})
+
+  # ---- API Gateway ----
+  S3BrowserApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub '${BucketName}-api'
+
+  ApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref S3BrowserApi
+      ParentId: !GetAtt S3BrowserApi.RootResourceId
+      PathPart: api
+
+  ApiProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref S3BrowserApi
+      ParentId: !Ref ApiResource
+      PathPart: '{proxy+}'
+
+  ApiMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref S3BrowserApi
+      ResourceId: !Ref ApiProxyResource
+      HttpMethod: ANY
+      AuthorizationType: AWS_IAM
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${S3BrowserFunction.Arn}/invocations'
+
+  ApiOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref S3BrowserApi
+      ResourceId: !Ref ApiProxyResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Amz-Security-Token,X-Amz-User-Agent'"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Headers: true
+
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: [ApiMethod, ApiOptionsMethod]
+    Properties:
+      RestApiId: !Ref S3BrowserApi
+      StageName: prod
+
+  LambdaApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref S3BrowserFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${S3BrowserApi}/*'
+
+Outputs:
+  WebsiteURL:
+    Description: S3 Browser URL
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}'
+  CloudFrontDomain:
+    Description: CloudFront distribution domain
+    Value: !GetAtt CloudFrontDistribution.DomainName
+  CloudFrontDistributionId:
+    Description: CloudFront distribution ID
+    Value: !Ref CloudFrontDistribution
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID
+    Value: !Ref UserPoolClient
+  IdentityPoolId:
+    Description: Cognito Identity Pool ID
+    Value: !Ref IdentityPool
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub 'https://${S3BrowserApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
+  RunForEveryUser:
+    Description: Run these two commands for each user (replace user@example.com with real email)
+    Value: !Sub >-
+      aws cognito-idp admin-create-user --user-pool-id ${UserPool}
+      --username user@example.com
+      --user-attributes Name=email,Value=user@example.com Name=email_verified,Value=true
+      --message-action SUPPRESS --region ${AWS::Region}
+      && aws ses verify-email-identity --email-address user@example.com --region ${AWS::Region}
