@@ -1,6 +1,23 @@
-# S3 Browser
+# S3 Lite
 
-A web application for browsing and managing AWS S3 buckets. Deployed as a CloudFormation stack with CloudFront, Cognito authentication (email OTP), and a Lambda-backed API with SigV4 signing.
+A web application for browsing and managing AWS S3 buckets.
+
+## Screenshots
+
+**Home Page** - Dashboard with account metrics and bucket list
+![Home Page](docs/images/home_page.png)
+
+**Bucket View** - Browse objects with storage class info and actions
+![Bucket Level](docs/images/bucket_level.png)
+
+**Object Detail** - View object metadata and change storage class
+![Object Level](docs/images/object_level.png) Deployed as a CloudFormation stack with CloudFront, Cognito authentication (email OTP), and a Lambda-backed API with SigV4 signing.
+
+## ⚠️ Disclaimer
+
+This is an independent open source project. It is **not affiliated with, endorsed by, or vetted by Amazon Web Services (AWS)**. The authors assume no responsibility for any damages, data loss, or costs incurred from using this software. Use at your own risk.
+
+Contributions are welcome! If you find bugs or have improvements, please [open an issue](https://github.com/kvr2277/s3lite/issues) or submit a pull request.
 
 ## ⚠️ Important Cautions
 
@@ -35,14 +52,6 @@ chmod +x deploy.sh
 ./deploy.sh
 ```
 
-The script will:
-1. Deploy the CloudFormation stack (S3, CloudFront, Cognito, API Gateway, Lambda)
-2. Generate `website/config.js` with stack outputs
-3. Upload website files to S3
-4. Invalidate the CloudFront cache
-5. Print the website URL
-
-
 ## Add Users
 
 After deploying, add users with:
@@ -57,9 +66,27 @@ Replace `youremail@example.com` with the actual email address. Repeat for each u
 To get the URL later (replace region if needed):
 
 ```bash
-aws cloudformation describe-stacks --stack-name s3-browser-stack --region us-east-1 \
+aws cloudformation describe-stacks --stack-name s3-lite-stack --region us-east-1 \
   --query "Stacks[0].Outputs[?OutputKey=='WebsiteURL'].OutputValue" --output text
 ```
+
+## Delete Stack
+
+To remove the stack and all resources:
+
+```bash
+# First, empty the S3 bucket (required before deletion)
+BUCKET_NAME="s3-lite-$(aws sts get-caller-identity --query Account --output text)"
+aws s3 rm "s3://$BUCKET_NAME" --recursive
+
+# Delete the CloudFormation stack
+aws cloudformation delete-stack --stack-name s3-lite-stack --region us-east-1
+
+# Wait for deletion to complete
+aws cloudformation wait stack-delete-complete --stack-name s3-lite-stack --region us-east-1
+```
+
+**Lambda@Edge deletion issue**: If stack deletion fails with "Lambda was unable to delete... because it is a replicated function", this is normal. Lambda@Edge replicas take several hours to be removed from edge locations. Wait a few hours, then run `aws cloudformation delete-stack` again.
 
 ## Project Structure
 

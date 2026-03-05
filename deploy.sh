@@ -1,10 +1,10 @@
 #!/bin/bash
 set -e
-STACK_NAME="s3-browser-stack"
-BUCKET_NAME="s3-browser-$(aws sts get-caller-identity --query Account --output text)"
+STACK_NAME="s3-lite-stack"
+BUCKET_NAME="s3-lite-$(aws sts get-caller-identity --query Account --output text)"
 REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 
-echo "Deploying S3 Browser..."
+echo "Deploying S3 Lite..."
 echo "Stack: $STACK_NAME | Bucket: $BUCKET_NAME | Region: $REGION"
 
 echo "1. Deploying infrastructure..."

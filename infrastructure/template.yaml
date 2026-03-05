@@ -1,12 +1,12 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  S3 Browser - CloudFront + Lambda API, protected by Cognito email OTP login
+  S3 Lite - CloudFront + Lambda API, protected by Cognito email OTP login
   with SigV4-signed API calls. After deploy, add users via CLI.
 
 Parameters:
   BucketName:
     Type: String
-    Default: s3-browser-static-site
+    Default: s3-lite-static-site
     Description: Name for the S3 bucket hosting the static website
 
 Resources:
@@ -129,7 +129,7 @@ Resources:
                 Source=email,
                 Destination={'ToAddresses': [email]},
                 Message={
-                  'Subject': {'Data': 'S3 Browser - Your login code'},
+                  'Subject': {'Data': 'S3 Lite - Your login code'},
                   'Body': {'Text': {'Data': f'Your verification code is: {code}\n\nThis code expires in 5 minutes.'}}
                 })
               event['response']['publicChallengeParameters'] = {'email': email}
@@ -360,7 +360,7 @@ Resources:
               StringEquals:
                 AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}'
 
-  # ---- S3 Browser API Lambda ----
+  # ---- S3 Lite API Lambda ----
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -984,7 +984,7 @@ Resources:
 
 Outputs:
   WebsiteURL:
-    Description: S3 Browser URL
+    Description: S3 Lite URL
     Value: !Sub 'https://${CloudFrontDistribution.DomainName}'
   CloudFrontDomain:
     Description: CloudFront distribution domain

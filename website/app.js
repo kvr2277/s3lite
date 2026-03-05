@@ -1,4 +1,4 @@
-// S3 Browser - with Cognito auth + SigV4 API signing
+// S3 Lite - with Cognito auth + SigV4 API signing
 (function () {
   'use strict';
 

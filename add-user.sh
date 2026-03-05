@@ -6,7 +6,7 @@ if [ -z "$ADD_USER_EMAIL" ]; then
   exit 1
 fi
 
-STACK_NAME="s3-browser-stack"
+STACK_NAME="s3-lite-stack"
 REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 
 POOL_ID=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" \
