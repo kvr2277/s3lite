@@ -166,6 +166,22 @@ body {
 /* Main Content */
 .main-content { padding: 1.5rem; max-width: 1400px; margin: 0 auto; }
 
+/* Account Badge (header) */
+.account-badge {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: #f1f5f9;
+  padding: 0.25rem 0.625rem;
+  border-radius: 4px;
+  font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+}
+.nav-divider {
+  width: 1px;
+  height: 1rem;
+  background: var(--border);
+}
+
 /* Dashboard Cards */
 .dashboard-cards {
   display: grid;

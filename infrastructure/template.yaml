@@ -386,6 +386,9 @@ Resources:
                 Action: [cloudwatch:GetMetricData, cloudwatch:ListMetrics]
                 Resource: '*'
               - Effect: Allow
+                Action: iam:ListAccountAliases
+                Resource: '*'
+              - Effect: Allow
                 Action:
                   - s3:ListBucket
                   - s3:ListBucketVersions
@@ -427,6 +430,8 @@ Resources:
           s3 = boto3.client('s3')
           cw = boto3.client('cloudwatch')
           lam = boto3.client('lambda')
+          sts = boto3.client('sts')
+          iam = boto3.client('iam')
           _region_cache = {}
           _s3_clients = {}
           _cw_clients = {}
@@ -484,6 +489,13 @@ Resources:
               except: body = {}
             if method == 'OPTIONS': return r(200, {})
             try:
+              if path == 'account-info' and method == 'GET':
+                identity = sts.get_caller_identity()
+                try:
+                  aliases = iam.list_account_aliases().get('AccountAliases', [])
+                  account_name = aliases[0] if aliases else None
+                except: account_name = None
+                return r(200, {'accountId': identity['Account'], 'accountName': account_name, 'region': os.environ.get('AWS_REGION', 'us-east-1')})
               if path == 'metrics' and method == 'GET':
                 return r(200, get_metrics(s3.list_buckets().get('Buckets',[])))
               if path == 'storage-breakdown' and method == 'GET':

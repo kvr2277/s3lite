@@ -378,6 +378,16 @@
   }
 
   // --- Home: Metrics ---
+  async function loadAccountInfo() {
+    try {
+      var data = await api('account-info');
+      var display = data.accountName ? data.accountName + ' (' + data.accountId + ')' : data.accountId;
+      $1('#aws-account-id').textContent = display;
+    } catch (err) {
+      $1('#aws-account-id').textContent = '-';
+    }
+  }
+
   async function loadMetrics() {
     $1('#total-buckets').textContent = '...';
     $1('#total-objects').textContent = '...';
@@ -1312,6 +1322,7 @@
 
     try {
       await initCredentials();
+      loadAccountInfo();
       var route = parseHash();
       window.navigateTo(route.view, route.params);
     } catch (err) {
