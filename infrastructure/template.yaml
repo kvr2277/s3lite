@@ -685,8 +685,29 @@ Resources:
                 if qs.get('continuationToken'): p['ContinuationToken'] = qs['continuationToken']
                 res = rs3.list_objects_v2(**p)
                 return r(200, {'Contents':[{'Key':o['Key'],'Size':o['Size'],'StorageClass':o.get('StorageClass','STANDARD'),'LastModified':o['LastModified'].isoformat()} for o in res.get('Contents',[])],'CommonPrefixes':[px['Prefix'] for px in res.get('CommonPrefixes',[])],'IsTruncated':res.get('IsTruncated',False),'NextContinuationToken':res.get('NextContinuationToken')})
+              if sub == 'objects-versions' and method == 'GET':
+                prefix = qs.get('prefix', '')
+                ver_status = rs3.get_bucket_versioning(Bucket=bucket).get('Status')
+                if ver_status not in ('Enabled', 'Suspended'):
+                  return r(200, {'enabled': False, 'versions': {}})
+                versions_map = {}
+                paginator = rs3.get_paginator('list_object_versions')
+                page_params = {'Bucket': bucket}
+                if prefix: page_params['Prefix'] = prefix
+                for page in paginator.paginate(**page_params):
+                  for v in page.get('Versions', []):
+                    k = v['Key']
+                    if k not in versions_map: versions_map[k] = {'count': 0, 'size': 0, 'deleteMarkers': 0}
+                    versions_map[k]['count'] += 1
+                    versions_map[k]['size'] += v.get('Size', 0)
+                  for dm in page.get('DeleteMarkers', []):
+                    k = dm['Key']
+                    if k not in versions_map: versions_map[k] = {'count': 0, 'size': 0, 'deleteMarkers': 0}
+                    versions_map[k]['deleteMarkers'] += 1
+                return r(200, {'enabled': True, 'versions': versions_map})
               if sub == 'object-detail' and method == 'GET':
-                res = rs3.head_object(Bucket=bucket, Key=qs.get('key','')); sc = res.get('StorageClass','STANDARD')
+                key = qs.get('key','')
+                res = rs3.head_object(Bucket=bucket, Key=key); sc = res.get('StorageClass','STANDARD')
                 out = {'ContentLength':res['ContentLength'],'StorageClass':sc,'LastModified':res['LastModified'].isoformat(),'ETag':res.get('ETag',''),'ContentType':res.get('ContentType','')}
                 if sc == 'INTELLIGENT_TIERING':
                   out['ArchiveStatus'] = res.get('ArchiveStatus','')
@@ -694,6 +715,22 @@ Resources:
                     tiers = rs3.get_bucket_intelligent_tiering_configuration(Bucket=bucket, Id='AutoArchive').get('IntelligentTieringConfiguration',{}).get('Tierings',[])
                     out['ITConfig'] = [{'AccessTier':t['AccessTier'],'Days':t['Days']} for t in tiers]
                   except: out['ITConfig'] = []
+                # Get version info
+                try:
+                  ver_status = rs3.get_bucket_versioning(Bucket=bucket).get('Status')
+                  if ver_status == 'Enabled' or ver_status == 'Suspended':
+                    versions = []; total_size = 0; delete_markers = 0
+                    paginator = rs3.get_paginator('list_object_versions')
+                    for page in paginator.paginate(Bucket=bucket, Prefix=key):
+                      for v in page.get('Versions', []):
+                        if v['Key'] == key:
+                          versions.append(v); total_size += v.get('Size', 0)
+                      for dm in page.get('DeleteMarkers', []):
+                        if dm['Key'] == key: delete_markers += 1
+                    out['versionCount'] = len(versions)
+                    out['versionsTotalSize'] = total_size
+                    out['deleteMarkers'] = delete_markers
+                except: pass
                 return r(200, out)
               if sub == 'download' and method == 'GET':
                 try: rs3.get_bucket_cors(Bucket=bucket)

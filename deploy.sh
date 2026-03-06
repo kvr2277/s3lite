@@ -69,5 +69,6 @@ fi
 echo ""
 echo "Done! Website: https://$CF_DOMAIN"
 echo ""
-echo "Next step - Add users to login"
+echo "Next step - Add users to login by running:"
+echo "ADD_USER_EMAIL=youremail@example.com ./add-user.sh"
 echo ""

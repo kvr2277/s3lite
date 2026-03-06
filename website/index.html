@@ -151,9 +151,13 @@
             <button class="btn btn-primary" id="btn-show-create-folder">+ New Folder</button>
             <button class="btn btn-primary" id="btn-upload-files">Upload Files</button>
             <input type="file" id="file-input" multiple style="display:none;">
-            <a class="btn btn-secondary" id="btn-delete-bucket" href="#" target="_blank" rel="noopener">Delete Bucket</a>
+            <div class="bucket-delete-group" id="bucket-delete-group">
+              <a class="btn btn-danger-outline" id="btn-empty-bucket" href="#" target="_blank" rel="noopener" style="display:none;">Empty Bucket</a>
+              <a class="btn btn-danger-outline" id="btn-delete-bucket" href="#" target="_blank" rel="noopener">Delete Bucket</a>
+            </div>
             <button class="btn btn-secondary" id="btn-download-selected" disabled>Download Selected as ZIP</button>
             <button class="btn btn-secondary" id="btn-download-bucket">Download All as ZIP</button>
+            <button class="btn btn-secondary" id="btn-show-versions" title="Load version info for objects">Show Versions</button>
           </div>
         </div>
         <!-- Standard Tier Banner (bucket level) -->
@@ -244,6 +248,7 @@
                 <th class="sortable" id="osort-name">Name <span class="sort-arrow">▲</span></th>
                 <th class="sortable" id="osort-size">Size <span class="sort-arrow"></span></th>
                 <th>Storage Class</th>
+                <th class="versions-col" style="display:none;">Versions</th>
                 <th class="sortable" id="osort-date">Last Modified <span class="sort-arrow"></span></th>
                 <th>Actions</th>
               </tr>
@@ -273,6 +278,7 @@
             <div class="meta-item"><span class="meta-label">Storage Class</span><span class="meta-value" id="object-storage-class"></span></div>
             <div class="meta-item"><span class="meta-label">Last Modified</span><span class="meta-value" id="object-modified"></span></div>
             <div class="meta-item"><span class="meta-label">ETag</span><span class="meta-value" id="object-etag"></span></div>
+            <div class="meta-item" id="object-versions-item" style="display:none;"><span class="meta-label">Versions</span><span class="meta-value" id="object-versions"></span></div>
           </div>
           <!-- IT Transition Timeline -->
           <div id="it-timeline" class="it-timeline" style="display:none;">

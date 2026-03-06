@@ -9,6 +9,8 @@
   var continuationToken = null;
   var selectedObjects = new Set();
   var allObjects = [];
+  var objectVersions = {};
+  var versionsLoaded = false;
   var credentialsReady = false;
 
   var $1 = function(sel) { return document.querySelector(sel); };
@@ -187,6 +189,11 @@
     return 'https://' + region + '.console.aws.amazon.com/s3/bucket/' + encodeURIComponent(bucket) + '/delete?region=' + region;
   }
 
+  function s3ConsoleEmptyUrl(bucket, region) {
+    region = region || CONFIG.region;
+    return 'https://s3.console.aws.amazon.com/s3/bucket/' + encodeURIComponent(bucket) + '/empty?region=' + region;
+  }
+
   var consoleSvg = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>';
 
   function showConfirm(title, message, onConfirm, recommendation) {
@@ -316,16 +323,26 @@
       currentPrefix = params.prefix || '';
       $1('#bucket-view').style.display = 'block';
       updateBreadcrumb(buildBucketBreadcrumb());
+      // Reset bucket action buttons and version state
+      $1('#bucket-delete-group').style.display = currentPrefix ? 'none' : 'flex';
+      $1('#btn-empty-bucket').style.display = 'none';
+      $1('#btn-delete-bucket').classList.remove('btn-disabled');
+      objectVersions = {};
+      versionsLoaded = false;
+      $1('#btn-show-versions').textContent = 'Show Versions';
+      $$('.versions-col').forEach(function(el) { el.style.display = 'none'; });
       // Fetch region if not known, then update console links
       if (!currentBucketRegion) {
         api('buckets/' + currentBucket + '/location').then(function(data) {
           currentBucketRegion = data.Region || CONFIG.region;
           $1('#bucket-console-link').href = s3ConsoleUrl(currentBucket, currentPrefix || null, currentBucketRegion);
           $1('#btn-delete-bucket').href = s3ConsoleDeleteUrl(currentBucket, currentBucketRegion);
+          $1('#btn-empty-bucket').href = s3ConsoleEmptyUrl(currentBucket, currentBucketRegion);
         }).catch(function() { currentBucketRegion = CONFIG.region; });
       } else {
         $1('#bucket-console-link').href = s3ConsoleUrl(currentBucket, currentPrefix || null, currentBucketRegion);
         $1('#btn-delete-bucket').href = s3ConsoleDeleteUrl(currentBucket, currentBucketRegion);
+        $1('#btn-empty-bucket').href = s3ConsoleEmptyUrl(currentBucket, currentBucketRegion);
       }
       loadBucketContents();
     } else if (view === 'object') {
@@ -887,11 +904,22 @@
   function renderObjectTable() {
     updateObjSortArrows();
     $1('#object-list').innerHTML = allObjects.map(function(obj) {
+      var versionCell = '';
+      if (versionsLoaded) {
+        var vInfo = objectVersions[obj.key];
+        if (vInfo && vInfo.count > 0) {
+          var vText = vInfo.count + ' (' + fmtBytes(vInfo.size) + ')';
+          if (vInfo.deleteMarkers > 0) vText += ' +' + vInfo.deleteMarkers + 'dm';
+          versionCell = '<td class="versions-col">' + vText + '</td>';
+        } else {
+          versionCell = '<td class="versions-col">-</td>';
+        }
+      }
       if (obj.type === 'folder') {
         return '<tr data-name="' + esc(obj.name) + '"><td></td>' +
           '<td><span class="object-name-cell" onclick="navigateTo(\'bucket\', {bucket:\'' + escJs(currentBucket) + '\', prefix:\'' + escJs(obj.key) + '\'})">' +
           '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg> ' +
-          esc(obj.name) + '/<a href="' + s3ConsoleUrl(currentBucket, obj.key, currentBucketRegion) + '" target="_blank" rel="noopener" class="console-link" title="Open in S3 Console" onclick="event.stopPropagation();">' + consoleSvg + '</a></span></td><td>-</td><td>-</td><td>-</td><td></td></tr>';
+          esc(obj.name) + '/<a href="' + s3ConsoleUrl(currentBucket, obj.key, currentBucketRegion) + '" target="_blank" rel="noopener" class="console-link" title="Open in S3 Console" onclick="event.stopPropagation();">' + consoleSvg + '</a></span></td><td>-</td><td>-</td>' + (versionsLoaded ? '<td class="versions-col">-</td>' : '') + '<td>-</td><td></td></tr>';
       }
       return '<tr data-name="' + esc(obj.name) + '" data-key="' + esc(obj.key) + '">' +
         '<td><input type="checkbox" class="obj-checkbox" data-key="' + esc(obj.key) + '"' + (selectedObjects.has(obj.key) ? ' checked' : '') + '></td>' +
@@ -900,6 +928,7 @@
         esc(obj.name) + '<a href="' + s3ConsoleUrl(currentBucket, obj.key, currentBucketRegion) + '" target="_blank" rel="noopener" class="console-link" title="Open in S3 Console" onclick="event.stopPropagation();">' + consoleSvg + '</a></span></td>' +
         '<td>' + fmtBytes(obj.size) + '</td>' +
         '<td><span class="badge">' + obj.storageClass + '</span></td>' +
+        versionCell +
         '<td>' + new Date(obj.lastModified).toLocaleString() + '</td>' +
         '<td><div class="action-cell">' +
         '<button class="btn btn-sm btn-icon" onclick="deleteObject(\'' + escJs(obj.key) + '\')" title="Open in S3 Console to delete"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>' +
@@ -929,6 +958,24 @@
     var files = allObjects.filter(function(o) { return o.type === 'file'; });
     $1('#bucket-file-count').textContent = fmtNum(files.length);
     $1('#bucket-total-size').textContent = fmtBytes(files.reduce(function(s, o) { return s + (o.size || 0); }, 0));
+    // Show Empty Bucket button if bucket has objects
+    var emptyBtn = $1('#btn-empty-bucket');
+    var deleteBtn = $1('#btn-delete-bucket');
+    var deleteGroup = $1('#bucket-delete-group');
+    if (currentPrefix) {
+      deleteGroup.style.display = 'none';
+    } else if (allObjects.length > 0) {
+      deleteGroup.style.display = 'flex';
+      emptyBtn.style.display = '';
+      emptyBtn.href = s3ConsoleEmptyUrl(currentBucket, currentBucketRegion);
+      deleteBtn.classList.add('btn-disabled');
+      deleteBtn.title = 'Empty bucket first before deleting';
+    } else {
+      deleteGroup.style.display = 'flex';
+      emptyBtn.style.display = 'none';
+      deleteBtn.classList.remove('btn-disabled');
+      deleteBtn.title = '';
+    }
   }
 
   $1('#btn-convert-bucket-it').addEventListener('click', function() {
@@ -991,6 +1038,16 @@
       $1('#object-storage-class').textContent = head.StorageClass || 'STANDARD';
       $1('#object-modified').textContent = new Date(head.LastModified).toLocaleString();
       $1('#object-etag').textContent = head.ETag || '-';
+      // Show version info if available
+      var versionsItem = $1('#object-versions-item');
+      if (head.versionCount !== undefined && head.versionCount > 0) {
+        var versionText = head.versionCount + ' version' + (head.versionCount > 1 ? 's' : '') + ' (' + fmtBytes(head.versionsTotalSize) + ' total)';
+        if (head.deleteMarkers > 0) versionText += ', ' + head.deleteMarkers + ' delete marker' + (head.deleteMarkers > 1 ? 's' : '');
+        $1('#object-versions').textContent = versionText;
+        versionsItem.style.display = '';
+      } else {
+        versionsItem.style.display = 'none';
+      }
       $1('#new-tier').value = head.StorageClass || 'STANDARD';
       toggleArchiveOptin();
 
@@ -1161,6 +1218,32 @@
     } catch (err) { toast('ZIP failed: ' + err.message, 'error'); }
     finally { hideLoading(); }
   }
+
+  // --- Show Versions ---
+  $1('#btn-show-versions').addEventListener('click', async function() {
+    if (versionsLoaded) {
+      versionsLoaded = false;
+      objectVersions = {};
+      $1('#btn-show-versions').textContent = 'Show Versions';
+      $$('.versions-col').forEach(function(el) { el.style.display = 'none'; });
+      renderObjectTable();
+      return;
+    }
+    showLoading('Loading version info...');
+    try {
+      var data = await api('buckets/' + currentBucket + '/objects-versions', { params: { prefix: currentPrefix } });
+      if (!data.enabled) {
+        toast('Versioning is not enabled for this bucket', 'info');
+        return;
+      }
+      objectVersions = data.versions || {};
+      versionsLoaded = true;
+      $1('#btn-show-versions').textContent = 'Hide Versions';
+      $$('.versions-col').forEach(function(el) { el.style.display = ''; });
+      renderObjectTable();
+    } catch (err) { toast('Failed to load versions: ' + err.message, 'error'); }
+    finally { hideLoading(); }
+  });
 
   // --- Create Folder ---
   $1('#btn-show-create-folder').addEventListener('click', function() {
